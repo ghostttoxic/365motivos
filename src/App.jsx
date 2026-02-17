@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Heart, X, Sparkles, Star, ArrowRight } from 'lucide-react';
+import { Heart, X, Sparkles, Star, ArrowRight, Lock, Loader2 } from 'lucide-react';
+import { supabase } from './supabase';
 
 // --- 10 MOTIVOS DE OURO (INTRODUÇÃO) ---
 const goldenReasonsList = [
@@ -396,34 +397,97 @@ const reasonsList = generateReasons();
 const TOTAL_REASONS = reasonsList.length;
 
 export default function App() {
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [passcode, setPasscode] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [loginError, setLoginError] = useState('');
+
   const [view, setView] = useState('intro'); // 'intro', 'golden', 'main'
   const [openedCards, setOpenedCards] = useState([]);
   const [selectedReason, setSelectedReason] = useState(null);
   const [goldenRevealed, setGoldenRevealed] = useState([]); // Array de índices revelados nos golden cards
 
-  // Carregar progresso
+  // Verificar se já está autenticado (cache simples local)
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem('love_progress_365_v2');
-      if (saved) {
-        setOpenedCards(JSON.parse(saved));
-      }
-    } catch (error) { }
+    const cachedPass = localStorage.getItem('365_passcode');
+    if (cachedPass) {
+      setPasscode(cachedPass);
+      handleLogin(cachedPass);
+    }
   }, []);
 
-  // Salvar progresso
-  useEffect(() => {
+  const handleLogin = async (codeToUse) => {
+    const code = codeToUse || passcode;
+    if (!code) return;
+
+    setLoading(true);
+    setLoginError('');
+
     try {
-      if (openedCards.length > 0) {
-        localStorage.setItem('love_progress_365_v2', JSON.stringify(openedCards));
+      // Tentar buscar o usuário pelo passcode
+      let { data, error } = await supabase
+        .from('user_progress')
+        .select('*')
+        .eq('id', code)
+        .single();
+
+      if (error && error.code !== 'PGRST116') {
+        // Erro real (diferente de "não encontrado")
+        throw error;
       }
-    } catch (error) { }
-  }, [openedCards]);
+
+      if (!data) {
+        // Usuário não existe, criar um novo
+        const { data: newData, error: createError } = await supabase
+          .from('user_progress')
+          .insert([
+            { id: code, opened_cards: [], golden_revealed: [] }
+          ])
+          .select()
+          .single();
+
+        if (createError) throw createError;
+        data = newData;
+      }
+
+      // Sucesso! Carregar dados
+      setOpenedCards(data.opened_cards || []);
+      setGoldenRevealed(data.golden_revealed || []);
+      setIsAuthenticated(true);
+      localStorage.setItem('365_passcode', code); // Manter logado neste dispositivo
+    } catch (err) {
+      console.error('Erro no login:', err);
+      setLoginError('Não foi possível conectar. Verifique sua senha ou conexão.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Salvar progresso no Supabase quando mudar
+  const saveProgress = async (newOpenedCards, newGoldenRevealed) => {
+    // Atualiza estado local
+    if (newOpenedCards) setOpenedCards(newOpenedCards);
+    if (newGoldenRevealed) setGoldenRevealed(newGoldenRevealed);
+
+    // Atualiza no Supabase
+    try {
+      await supabase
+        .from('user_progress')
+        .upsert({
+          id: passcode,
+          opened_cards: newOpenedCards || openedCards,
+          golden_revealed: newGoldenRevealed || goldenRevealed
+        });
+    } catch (error) {
+      console.error('Erro ao salvar:', error);
+    }
+  };
 
   const handleCardClick = (reason) => {
     setSelectedReason(reason);
     if (!openedCards.includes(reason.id)) {
-      setOpenedCards(prev => [...prev, reason.id]);
+      const newOpened = [...openedCards, reason.id];
+      saveProgress(newOpened, null);
     }
   };
 
@@ -433,11 +497,49 @@ export default function App() {
 
   const handleGoldenClick = (index) => {
     if (!goldenRevealed.includes(index)) {
-      setGoldenRevealed(prev => [...prev, index]);
+      const newRevealed = [...goldenRevealed, index];
+      saveProgress(null, newRevealed);
     }
   };
 
   const progressPercentage = (openedCards.length / TOTAL_REASONS) * 100;
+
+  // --- TELA DE LOGIN ---
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-pink-50 flex flex-col items-center justify-center p-4">
+        <div className="bg-white p-8 rounded-2xl shadow-xl max-w-sm w-full text-center">
+          <div className="mx-auto bg-pink-100 p-3 rounded-full w-16 h-16 flex items-center justify-center mb-6">
+            <Lock className="text-pink-500 w-8 h-8" />
+          </div>
+          <h2 className="text-2xl font-bold text-gray-800 mb-2 font-handwriting">Acesso Secreto</h2>
+          <p className="text-gray-500 mb-6 text-sm">
+            Digite a senha especial para acessar seus 365 motivos.
+          </p>
+
+          <input
+            type="text"
+            placeholder="Senha do casal..."
+            value={passcode}
+            onChange={(e) => setPasscode(e.target.value)}
+            className="w-full px-4 py-3 rounded-lg border border-gray-200 focus:border-pink-500 focus:ring-2 focus:ring-pink-200 outline-none transition mb-4 text-center text-lg"
+          />
+
+          {loginError && (
+            <p className="text-red-500 text-xs mb-4">{loginError}</p>
+          )}
+
+          <button
+            onClick={() => handleLogin()}
+            disabled={loading || !passcode}
+            className="w-full bg-pink-500 text-white font-bold py-3 rounded-lg hover:bg-pink-600 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+          >
+            {loading ? <Loader2 className="animate-spin w-5 h-5" /> : 'Entrar'}
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   // --- COMPONENTE DO POTE (JAR) ---
   const JarIntro = () => (
@@ -576,6 +678,18 @@ export default function App() {
                 <Heart className="text-red-500 w-6 h-6 fill-red-500" />
                 <span className="font-bold text-lg text-gray-800 hidden sm:inline">365 Motivos</span>
                 <span className="font-bold text-lg text-gray-800 sm:hidden">365</span>
+
+                {/* Botão Sair */}
+                <button
+                  onClick={() => {
+                    localStorage.removeItem('365_passcode');
+                    setIsAuthenticated(false);
+                    setPasscode('');
+                  }}
+                  className="ml-2 text-xs text-pink-400 underline"
+                >
+                  Sair
+                </button>
               </div>
 
               <div className="flex flex-col items-end w-2/3 sm:w-1/3">
